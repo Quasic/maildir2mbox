@@ -3,7 +3,7 @@
 # This nested command will extract the base directory where this script
 # is located, wherever the current directory is.
 
-FILES=(*)
+readarray -t FILES < <(find . -maxdepth 1 -type f -printf '%P\n')
 TOTAL="${#FILES[@]}"
 COUNT=0
 LASTPERCENT=0
@@ -62,7 +62,7 @@ do
 		NOTE=''
 	}
 	printf \\n
-
+	printf '\rConverted %10s\n' "$i" >&2
 done
 
 printf "\nFinished.\n" >&2
