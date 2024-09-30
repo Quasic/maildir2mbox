@@ -2,66 +2,67 @@
 
 # This nested command will extract the base directory where this script
 # is located, wherever the current directory is.
-# This is likely not to work on BSD based UNIXes, like Mac OS X or
-# Net/Open/Free/Dragonfly/*BSD.
-# In case it fails, please define manually the path to dateRfc3339ToMbox.pl
-# below.
-SCRIPTPATH=$(dirname "$(readlink -f "${0}")")
 
-# Please define this manually in case autodetection fails.
-DATESCRIPT="${SCRIPTPATH}/dateRfc3339ToMbox.pl"
-
-TOTAL=$(($(ls -l | wc -l)-1))
+FILES=(*)
+TOTAL="${#FILES[@]}"
 COUNT=0
 LASTPERCENT=0
 
-echo "Starting up, found $TOTAL emails" >&2
+printf %s\\n "Starting up, found $TOTAL emails" >&2
 
 # Run through all files in the current dir
-for i in *
+for i in "${FILES[@]}"
 do
 	# Work out progress and display
-	COUNT=$((${COUNT}+1))
-	PERCENT=$((${COUNT}*100/${TOTAL}))
+	COUNT=$((COUNT+1))
+	PERCENT=$((COUNT*100/TOTAL))
 	if [ ${PERCENT} -gt ${LASTPERCENT} ]; then
 		LASTPERCENT=${PERCENT}
-		echo -en "\rConverting: ${PERCENT}% done" >&2
+		printf "\rConverting: %i%% done" "$PERCENT" >&2
 	fi
 
-	# Use a temporary file to store the email, putting all headers on one line each (no line wrapping)
-	TMPFILE=$(mktemp)
-	cat ${i} | perl -p0e 's/\n[\t ]+/ /g' > ${TMPFILE}
-
 	# Parse the email file
-	while read line
+	while read -r line
 	do
 		# Ignore anything after the header
 		if [ "a${line}" == "a" ]; then break; fi
 
 		# Catch the From email address
-		echo ${line} | grep "^From:" > /dev/null
-		if [ ${?} -eq 0 ]; then
-			MAILADDR=$(echo ${line} | sed "s/^From: //" | sed "s/^[^<]*<\(.\+@.\+\)>/\1/")
+		if [ 'From:' = "${line:0:5}" ]; then
+			MAILADDR="${line#From: *<}"
+			MAILADDR="${MAILADDR%>*}"
 		fi
 
 		# Catch the Date
-		echo ${line} | grep "^Date:" > /dev/null
-		if [ ${?} -eq 0 ]; then
-			DATE=$(echo ${line} | sed "s/^Date: //")
-
+		if [ 'Date:' = "${line:0:5}" ]; then
 			# Convert the date
-			DATE=$("${DATESCRIPT}" "${DATE}")
+			DATE=$(perl -we '
+				use strict;
+				eval {
+					require DateTime::Format::Mail;
+					print DateTime::Format::Mail->new->loose->parse_datetime($ARGV[0])->strftime("%a %b %e %T %Y");
+				};
+				if($@){
+					$ARGV[0]=~/(Sun|Mon|Tue|Wed|Thu|Fri|Sat),? *([ 0-3][0-9]) *(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) *([0-9]{4}) *([ 0-2][0-9]:[0-5][0-9]:[0-5][0-9])/ or die;
+					print "$1 $3 $2 $5 $4";
+				}
+			' "${line#Date: }"||date --date="${line#Date: }" +'%a %b %e %T %Y')||{
+				DATE='Mon Jan  1 00:00:00 1900'
+				NOTE="Note: Original date of email unreadable: ${line#Date: }"
+			}
 		fi
 
-	done < ${TMPFILE}
-
-	rm ${TMPFILE}
+	done < <(perl -p0e 's/\n[\t ]+/ /g' < "$i")
 
 	# Output in mbox format
-	echo "From ${MAILADDR}  ${DATE}"
-	cat ${i}
-	echo ""
+	printf %s\\n "From ${MAILADDR}  ${DATE}"
+	cat "$i"
+	[ '' = "$NOTE" ]||{
+		printf %s\\n "$NOTE"
+		NOTE=''
+	}
+	printf \\n
 
 done
 
-echo -e "\nFinished." >&2
+printf "\nFinished.\n" >&2
