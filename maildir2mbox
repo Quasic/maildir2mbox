@@ -1,14 +1,143 @@
 #!/bin/bash
 
+FILES=()
+DEFADDR=''
+DEFDATE=''
+ARBITRARY=''
+FORMAT=mbox
+while [ $# != 0 ]
+do
+	case "$1" in
+	(--dir|--folder)
+		shift
+		printf 'Collecting files from %s...' "$1" >&2
+		readarray -t FILES -O ${#FILES[@]} < <(find "$1" -maxdepth 1 -type f -printf '%P\n')
+		printf '\rCollected files from %s. (Now %i total)\n' "$1" "${#FILES[@]}" >&2
+	;;
+	(--)
+		shift
+		FILES+=("$@")
+		break
+	;;
+	(--appendNote|--appendnote) appendNote=y;;
+	(--format)
+		shift
+		FORMAT="$1"
+	;;
+	(--mbox*) FORMAT="${1:2}";;
+	(--nl) nl=y;;
+	(--assumeDate|--assumedate)
+		shift
+		DEFDATE="$1"
+	;;
+	(--assumeFrom|--assumefrom)
+		shift
+		DEFADDR="$1"
+	;;
+	(--assumeFromMD|--assumefromMD) DEFADDR='MAILER-DAEMON';;
+	(--arbitrary)
+		shift
+		ARBITRARY="$1"
+	;;
+	(--help)
+		#shellcheck disable=SC2016
+		printf 'Usage: maildir2mbox [<options>] [--] [<files>]
+
+Emits mbox format file containing provided email files to stdout.
+By default, files are populated from the current directory.
+The emails are expected to be in RFC 822 format,
+such as maildir or .eml files.
+RFC 2822 and RFC 5322 formats should also be supported.
+Files not containing From and Date headers will be rejected
+unless an --assume* option is used.
+You may optionally pipe output through gzip for a compressed mbox.
+	Options:
+   Human output
+--help shows this help
+   Email gathering
+--dir <FOLDER> gathers emails from this folder
+               which is often $maildir/new or $maildir/cur
+--folder <FOLDER> alias of --dir
+--assumeFrom <SENDER> assumes files without From headers
+                      were sent from SENDER
+		      files will still be rejected without a Date header
+		      unless --assumeDate is used
+--assumeFromMD same as --assumeFrom MAILER-DAEMON
+--assumeDate <DATE> assumes files without Date headers have this date
+                    files will still be rejected without a From header
+		    unless --assumeFrom or --assumeFromMD is used
+   Format of mbox
+--appendNote appends notes, currently only date errors, to the email
+--arbitrary <data> appends data to end of From line in mbox
+                   Very few programs may use this to
+		   better separate messages
+--format <FORMAT> format is one of mbox mboxo mboxrd mboxcl mboxcl2
+                  Alternatively, each has its own option.
+		  Find one your reader can read.
+                  mbox is the default basic format
+		  It suffers from the problem that a line starting with
+		  "From " followed by a blank line may look like a new message
+		  Validating the rest of the line reduces the chances, but
+		  not all readers do this. A few may use additional data to
+		  help in validating, as well. See --arbitrary, above.
+		  See --mbox* options, below, for the other formats
+--mboxcl is a newer System V format used by mutt that irreversibly adds
+         > to lines beginning with "From " in message bodies
+	 It also replaces Content-Length: headers.
+	 In this version, we save originals as >Content-Length: headers.
+	 mb2md has the -c option for this format
+--mboxcl2 is a new System V format that replaces Content-Length: headers
+          instead of using From headers.
+	  In this version, we save originals as >Content-Length: headers.
+	  mb2md -c currently does NOT support this format
+--mboxo uses the original System V format that irreversibly adds
+        > to lines beginning with "From " in message bodies
+--mboxrd uses reversible From quoting, where multiple > may be added
+         invented independantly by Rahul Dhesi, Tim Goodwin, and others
+--nl add newline to any emails without one at the end
+
+	Examples:
+# convert new emails to uncompressed $mbox/Inbox
+maildir2mbox --dir $maildir/new >$mbox/Inbox
+
+# Store emails in current directory
+# to highly compressed mbox $mbox/archive
+maildir2mbox | gzip -9 >$mbox/archive.gz
+
+	Disclaimer:
+Keep the old files until you have verified the new one!
+' >&2
+		exit 129
+	;;
+	(-*)
+		printf 'Unrecognized option: %i\n' "$1" >&2
+		exit 1
+	;;
+	(*)
+		if [ -f "$1" ]
+		then
+			FILES+=("$1")
+		else
+			printf 'Not a file: %s\n' "$1" >%2
+			exit 1
+		fi
+	esac
+	shift
+done >&2
+
 # This nested command will extract the base directory where this script
 # is located, wherever the current directory is.
 
-readarray -t FILES < <(find . -maxdepth 1 -type f -printf '%P\n')
+[ 0 = ${#FILES[@]} ]&&{
+	printf 'No files given. Collecting from current directory '
+	pwd
+	readarray -t FILES < <(find . -maxdepth 1 -type f -printf '%P\n')
+} >&2
 TOTAL="${#FILES[@]}"
 COUNT=0
 LASTPERCENT=0
 
-printf %s\\n "Starting up, found $TOTAL emails" >&2
+printf %s\\n "Starting up, emiting $FORMAT format, found $TOTAL emails" >&2
 
 # Run through all files in the current dir
 for i in "${FILES[@]}"
@@ -20,6 +149,11 @@ do
 		LASTPERCENT=${PERCENT}
 		printf "\rConverting: %i%% done" "$PERCENT" >&2
 	fi
+
+	[ mboxcl2 = "$FORMAT" ]||{
+
+	DATE="$DEFDATE"
+	MAILADDR="$DEFADDR"
 
 	# Parse the email file
 	while read -r line
@@ -48,19 +182,48 @@ do
 				}
 			' "${line#Date: }"||date --date="${line#Date: }" +'%a %b %e %T %Y')||{
 				DATE='Mon Jan  1 00:00:00 1900'
-				NOTE="Note: Original date of email unreadable: ${line#Date: }"
+				[ y = "$appendNote" ]&&NOTE="Note: Original date of email unreadable: ${line#Date: }"
 			}
 		fi
 
 	done < <(perl -p0e 's/\n[\t ]+/ /g' < "$i")
 
-	# Output in mbox format
-	printf %s\\n "From ${MAILADDR}  ${DATE}"
-	cat "$i"
-	[ '' = "$NOTE" ]||{
-		printf %s\\n "$NOTE"
-		NOTE=''
+	[ '' != "$MAILADDR" ]||[ '' != "$DATE" ]||{
+		printf '\rRejected %11s\n' "$i" >&2
+		continue
 	}
+
+	# Output in mbox format
+	printf %s\\n "From ${MAILADDR}  ${DATE}$ARBITRARY"
+	}
+	case "$FORMAT" in
+	(mbox) cat "$i";;
+	(mboxo) sed 's/^From />&/' "$i";;
+	(mboxrd) sed 's/^>*From />&/' "$i";;
+	(mboxcl|mboxcl2) perl -we '
+use strict;
+no utf8;
+print ((/^Content-Length:/?">":"").$_) while (defined($_=<>)&&! /^\r?\n$/);
+local $/;
+my $rest=<>;
+print "Content-Length: ".length($rest)."\n\n$rest";
+	' "$i" <(
+		if [ mboxcl = "$FORMAT" ]
+		then sed 's/^From />&/' "$i"
+		else cat "$i"
+		fi
+	);;
+	(*)
+		printf 'Unknown format: %s\n' "$FORMAT" >&2
+		exit 1
+	esac
+	if [ '' = "$NOTE" ]
+	then
+		[ y = "$nl" ]&&[ 0 = "$(tail -c 1 "$i" | wc -l)" ]&&printf \\n
+	else
+		printf \\n%s\\n "$NOTE"
+		NOTE=''
+	fi
 	printf \\n
 	printf '\rConverted %10s\n' "$i" >&2
 done
